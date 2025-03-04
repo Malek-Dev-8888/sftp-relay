@@ -1,4 +1,4 @@
-name: SFTP Transfer via Gist
+name: SFTP Transfer with Detailed Logging
 
 on:
   repository_dispatch:
@@ -15,65 +15,105 @@ jobs:
         run: |
           echo "Event received at $(date)"
           echo "Timestamp from request: ${{ github.event.client_payload.timestamp }}"
-          echo "Gist ID: ${{ github.event.client_payload.gist_id }}"
-      
-      - name: Fetch JSON data from Gist
-        id: fetch-gist
+          
+      - name: Create JSON file
         run: |
-          # Récupérer le contenu du Gist
-          echo "Téléchargement des données depuis le Gist..."
-          GIST_CONTENT=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "User-Agent: GitHub-Action" \
-            "https://api.github.com/gists/${{ github.event.client_payload.gist_id }}")
-          
-          # Extraire l'URL du contenu brut
-          RAW_URL=$(echo "$GIST_CONTENT" | grep -o '"raw_url": "[^"]*"' | grep -o 'https://[^"]*')
-          
-          # Télécharger le contenu JSON brut
-          curl -s "$RAW_URL" > septeo.json
-          
-          # Vérifier que le fichier existe et a un contenu
-          if [ -s septeo.json ]; then
-            echo "JSON récupéré avec succès ($(stat -c%s septeo.json) octets)"
+          if [ -n "${{ github.event.client_payload.gist_id }}" ]; then
+            # Si on utilise un Gist, récupérer le contenu
+            echo "Récupération du contenu depuis le Gist..."
+            GIST_CONTENT=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "User-Agent: GitHub-Action" \
+              "https://api.github.com/gists/${{ github.event.client_payload.gist_id }}")
+            
+            # Extraire l'URL du contenu brut
+            RAW_URL=$(echo "$GIST_CONTENT" | grep -o '"raw_url": "[^"]*"' | grep -o 'https://[^"]*')
+            
+            # Télécharger le contenu JSON brut
+            curl -s "$RAW_URL" > septeo.json
           else
-            echo "Erreur: Impossible de récupérer le contenu JSON"
-            exit 1
+            # Sinon, utiliser les données envoyées directement
+            echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
           fi
           
-      - name: Setup SFTP Private Key
+          # Vérifier le fichier
+          echo "Fichier JSON créé avec succès, taille: $(stat -c%s septeo.json) octets"
+          echo "Contenu (premières lignes):"
+          head -n 10 septeo.json
+          
+      - name: Install required packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass openssh-client
+          
+      - name: Setup SFTP Environment
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SFTP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ftp.notaires.fr >> ~/.ssh/known_hosts
-          echo "SSH directory setup complete"
+          echo "Environnement SSH configuré"
           
-      - name: Transfer File via SFTP
+      - name: Test SFTP connection
         run: |
-          echo "Starting SFTP transfer..."
+          echo "Test de connexion SFTP..."
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
+          pwd
+          ls -la
+          EOF
+          
+      - name: Create directories if needed
+        run: |
+          echo "Vérification et création des répertoires si nécessaire..."
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
+          mkdir -p /json
+          cd /json
+          pwd
+          ls -la
+          EOF
+          
+      - name: Transfer File via SFTP with debugging
+        run: |
+          echo "Début du transfert SFTP..."
+          echo "Taille du fichier local: $(stat -c%s septeo.json) octets"
+          echo "Contenu du fichier local (début):"
+          head -n 5 septeo.json
+          
+          # Utiliser l'option -v (verbose) pour plus de détails
           sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
           cd /json
           put septeo.json
           ls -la
+          ! echo "Vérification du transfert..."
+          ! ls -la /json/septeo.json || echo "Fichier non trouvé"
           bye
           EOF
-          echo "SFTP transfer completed"
           
-      - name: Delete Gist after successful transfer
-        if: success()
+          echo "Transfert SFTP terminé"
+          
+      - name: Alternative transfer method
+        if: failure()
         run: |
-          echo "Suppression du Gist temporaire..."
-          curl -X DELETE \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "User-Agent: GitHub-Action" \
-            "https://api.github.com/gists/${{ github.event.client_payload.gist_id }}"
-          echo "Gist supprimé"
+          echo "Tentative de transfert alternatif..."
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa septeo.json i00003-septeo@ftp.notaires.fr:/json/septeo_$(date +%s).json
+          echo "Transfert alternatif terminé"
+          
+      - name: Delete Gist after job completion
+        if: github.event.client_payload.gist_id != ''
+        run: |
+          if [ -n "${{ github.event.client_payload.gist_id }}" ]; then
+            echo "Suppression du Gist temporaire..."
+            curl -X DELETE \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "User-Agent: GitHub-Action" \
+              "https://api.github.com/gists/${{ github.event.client_payload.gist_id }}"
+            echo "Gist supprimé"
+          fi
           
       - name: Cleanup
         if: always()
         run: |
           rm -f septeo.json
           rm -f ~/.ssh/id_rsa
-          echo "Cleanup completed"
+          echo "Nettoyage terminé"
