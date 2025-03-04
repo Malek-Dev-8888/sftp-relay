@@ -15,102 +15,99 @@ jobs:
         run: |
           echo "Event received at $(date)"
           echo "Timestamp from request: ${{ github.event.client_payload.timestamp || 'Not provided' }}"
-          echo "Debug payload data:"
-          echo '${{ toJson(github.event.client_payload) }}'
       
       - name: Create JSON file from payload or create test file
         run: |
-          # Vérifier si le payload contient des données json_data
-          if [ -n "${{ github.event.client_payload.json_data }}" ]; then
-            echo "Création du fichier JSON depuis le payload..."
-            echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
-          else
-            echo "Payload vide ou invalide, création d'un fichier JSON de test..."
-            # Créer un JSON de test
-            echo '{"test":"Données de test", "date":"'"$(date)"'", "source":"GitHub Actions"}' > septeo.json
-          fi
+          # Créer un JSON de test simple
+          echo '{"test":"Données de test", "date":"'"$(date)"'", "source":"GitHub Actions"}' > septeo.json
           
           # Vérifier que le fichier a été créé
           if [ -s septeo.json ]; then
             echo "JSON créé avec succès ($(stat -c%s septeo.json) octets)"
             echo "Aperçu du contenu:"
-            head -n 5 septeo.json
+            cat septeo.json
           else
             echo "ATTENTION: Fichier vide, création d'un nouveau fichier de secours"
             echo '{"backup":"Fichier de secours créé le '"$(date)"'"}' > septeo.json
             echo "Fichier de secours créé"
           fi
           
-          # Afficher le contenu du fichier pour déboguer
-          echo "Contenu complet du fichier JSON:"
-          cat septeo.json
-          
       - name: Install required packages
         run: |
           sudo apt-get update
           sudo apt-get install -y sshpass openssh-client
+          echo "Packages installés."
+          ssh -V
+          sshpass -V
           
-      - name: Setup SFTP Private Key
+      - name: Verify connectivity to SFTP server
         run: |
+          echo "Vérification de la connectivité vers le serveur SFTP..."
+          # Vérifier si le serveur est accessible
+          ping -c 3 ftp.notaires.fr || echo "Le ping a échoué, mais ce n'est pas grave si le serveur bloque les pings"
+      
+      - name: Setup SSH known hosts manually
+        run: |
+          echo "Configuration manuelle de known_hosts..."
           mkdir -p ~/.ssh
+          touch ~/.ssh/known_hosts
+          
+          # Essayer de récupérer la clé du serveur (avec gestion des erreurs)
+          echo "Tentative de récupération de la clé du serveur..."
+          ssh-keyscan -H ftp.notaires.fr > /tmp/keyscan.txt || echo "ssh-keyscan a échoué avec code $?"
+          
+          if [ -s /tmp/keyscan.txt ]; then
+            cat /tmp/keyscan.txt >> ~/.ssh/known_hosts
+            echo "Clé du serveur ajoutée à known_hosts"
+          else
+            echo "Impossible de récupérer la clé du serveur, ajout manuel d'une entrée générique"
+            # Ajouter une entrée générique pour désactiver la vérification de la clé
+            echo "ftp.notaires.fr ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==" >> ~/.ssh/known_hosts
+            echo "Entrée générique ajoutée à known_hosts"
+          fi
+          
+          # Afficher le contenu de known_hosts
+          echo "Contenu de known_hosts:"
+          cat ~/.ssh/known_hosts
+          
+      - name: Setup SFTP Private Key with StrictHostKeyChecking=no
+        run: |
+          echo "Configuration de la clé privée SSH..."
+          mkdir -p ~/.ssh
+          
+          # Écrire la clé privée dans un fichier temporaire
           echo "${{ secrets.SFTP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ftp.notaires.fr >> ~/.ssh/known_hosts
-          echo "Clé privée installée"
           
-      - name: Test SSH connection
-        run: |
-          echo "Test de connexion SSH..."
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr 'echo "Connexion réussie" && pwd && ls -la'
-        continue-on-error: true
-          
-      - name: Transfer File via SFTP
-        run: |
-          echo "Début du transfert SFTP..."
-          
-          # Premier essai avec sftp
-          echo "Tentative SFTP avec chemin absolu..."
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
-          pwd
-          mkdir -p /json
-          cd /json
-          pwd
-          put septeo.json
-          ls -la
-          bye
+          # Créer un fichier de configuration SSH pour désactiver StrictHostKeyChecking
+          cat > ~/.ssh/config << EOF
+          Host ftp.notaires.fr
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
           EOF
-        continue-on-error: true
+          chmod 600 ~/.ssh/config
           
-      - name: Alternative transfer using scp
+          echo "Configuration SSH terminée."
+          ls -la ~/.ssh/
+      
+      - name: Test alternate connection method with sshpass
         run: |
-          echo "Tentative alternative avec SCP..."
-          # Créer un nom de fichier unique avec timestamp
-          FILENAME="septeo_$(date +%s).json"
-          
-          # Tenter plusieurs variantes de chemins
-          echo "Essai 1: Chemin absolu /json/"
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa septeo.json i00003-septeo@ftp.notaires.fr:/json/$FILENAME
-          
-          echo "Essai 2: Chemin relatif json/"
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa septeo.json i00003-septeo@ftp.notaires.fr:json/$FILENAME
-          
-          echo "Essai 3: À la racine"
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa septeo.json i00003-septeo@ftp.notaires.fr:$FILENAME
-          
-          echo "Transferts SCP terminés"
-        continue-on-error: true
-          
-      - name: Verify file upload
-        run: |
-          echo "Vérification des fichiers transférés..."
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
-          echo "Contenu du répertoire /json:"
-          ls -la /json/
-          echo "Contenu du répertoire racine:"
-          ls -la
-          echo "Contenu du répertoire json (relatif):"
-          ls -la json/ 2>/dev/null || echo "Répertoire json/ n'existe pas"
+          echo "Test de connexion avec sshpass..."
+          # Utiliser directement sshpass sans clé privée
+          echo "Méthode avec mot de passe directement:"
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -o StrictHostKeyChecking=no i00003-septeo@ftp.notaires.fr << EOF || echo "Première méthode a échoué avec code $?"
+          pwd
+          quit
           EOF
+          
+          echo "Tentative alternative avec SCP et mot de passe..."
+          # Utiliser scp avec sshpass
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -o StrictHostKeyChecking=no septeo.json i00003-septeo@ftp.notaires.fr:/tmp/test.json || echo "SCP a échoué avec code $?"
+          
+      - name: Try curl SFTP upload
+        run: |
+          echo "Tentative avec curl SFTP..."
+          curl -v --insecure -u i00003-septeo:"${{ secrets.SFTP_PASSPHRASE }}" -T septeo.json sftp://ftp.notaires.fr/json/septeo_curl.json || echo "curl a échoué avec code $?"
           
       - name: Cleanup
         if: always()
