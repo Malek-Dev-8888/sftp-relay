@@ -1,0 +1,48 @@
+name: SFTP Transfer
+
+on:
+  repository_dispatch:
+    types: [sftp_transfer]
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Log event details
+        run: |
+          echo "Event received at $(date)"
+          echo "Timestamp from request: ${{ github.event.client_payload.timestamp }}"
+      
+      - name: Create JSON file
+        run: |
+          echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
+          echo "JSON file created: $(ls -la septeo.json)"
+          
+      - name: Setup SFTP Private Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SFTP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ftp.notaires.fr >> ~/.ssh/known_hosts
+          echo "SSH directory setup complete"
+          
+      - name: Transfer File via SFTP
+        run: |
+          echo "Starting SFTP transfer..."
+          sftp -v -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
+          cd /json
+          put septeo.json
+          ls -la
+          bye
+          EOF
+          echo "SFTP transfer completed"
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f septeo.json
+          rm -f ~/.ssh/id_rsa
+          echo "Cleanup completed"
