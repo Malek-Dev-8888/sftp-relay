@@ -1,4 +1,4 @@
-name: SFTP Transfer Direct
+name: SFTP Transfer with Python
 
 on:
   repository_dispatch:
@@ -16,102 +16,178 @@ jobs:
           echo "Event received at $(date)"
           echo "Timestamp from request: ${{ github.event.client_payload.timestamp || 'Not provided' }}"
       
-      - name: Create JSON file from payload or create test file
+      - name: Create test JSON file
         run: |
-          # Créer un JSON de test simple
           echo '{"test":"Données de test", "date":"'"$(date)"'", "source":"GitHub Actions"}' > septeo.json
-          
-          # Vérifier que le fichier a été créé
-          if [ -s septeo.json ]; then
-            echo "JSON créé avec succès ($(stat -c%s septeo.json) octets)"
-            echo "Aperçu du contenu:"
-            cat septeo.json
-          else
-            echo "ATTENTION: Fichier vide, création d'un nouveau fichier de secours"
-            echo '{"backup":"Fichier de secours créé le '"$(date)"'"}' > septeo.json
-            echo "Fichier de secours créé"
-          fi
-          
-      - name: Install required packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass openssh-client
-          echo "Packages installés."
-          ssh -V
-          sshpass -V
-          
-      - name: Verify connectivity to SFTP server
-        run: |
-          echo "Vérification de la connectivité vers le serveur SFTP..."
-          # Vérifier si le serveur est accessible
-          ping -c 3 ftp.notaires.fr || echo "Le ping a échoué, mais ce n'est pas grave si le serveur bloque les pings"
+          cat septeo.json
       
-      - name: Setup SSH known hosts manually
-        run: |
-          echo "Configuration manuelle de known_hosts..."
-          mkdir -p ~/.ssh
-          touch ~/.ssh/known_hosts
-          
-          # Essayer de récupérer la clé du serveur (avec gestion des erreurs)
-          echo "Tentative de récupération de la clé du serveur..."
-          ssh-keyscan -H ftp.notaires.fr > /tmp/keyscan.txt || echo "ssh-keyscan a échoué avec code $?"
-          
-          if [ -s /tmp/keyscan.txt ]; then
-            cat /tmp/keyscan.txt >> ~/.ssh/known_hosts
-            echo "Clé du serveur ajoutée à known_hosts"
-          else
-            echo "Impossible de récupérer la clé du serveur, ajout manuel d'une entrée générique"
-            # Ajouter une entrée générique pour désactiver la vérification de la clé
-            echo "ftp.notaires.fr ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ==" >> ~/.ssh/known_hosts
-            echo "Entrée générique ajoutée à known_hosts"
-          fi
-          
-          # Afficher le contenu de known_hosts
-          echo "Contenu de known_hosts:"
-          cat ~/.ssh/known_hosts
-          
-      - name: Setup SFTP Private Key with StrictHostKeyChecking=no
-        run: |
-          echo "Configuration de la clé privée SSH..."
-          mkdir -p ~/.ssh
-          
-          # Écrire la clé privée dans un fichier temporaire
-          echo "${{ secrets.SFTP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          
-          # Créer un fichier de configuration SSH pour désactiver StrictHostKeyChecking
-          cat > ~/.ssh/config << EOF
-          Host ftp.notaires.fr
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
-          EOF
-          chmod 600 ~/.ssh/config
-          
-          echo "Configuration SSH terminée."
-          ls -la ~/.ssh/
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
       
-      - name: Test alternate connection method with sshpass
+      - name: Install Python dependencies
         run: |
-          echo "Test de connexion avec sshpass..."
-          # Utiliser directement sshpass sans clé privée
-          echo "Méthode avec mot de passe directement:"
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -o StrictHostKeyChecking=no i00003-septeo@ftp.notaires.fr << EOF || echo "Première méthode a échoué avec code $?"
-          pwd
-          quit
+          python -m pip install --upgrade pip
+          pip install paramiko
+      
+      - name: Create Python SFTP script
+        run: |
+          cat > sftp_upload.py << 'EOF'
+          #!/usr/bin/env python3
+          import os
+          import sys
+          import json
+          import paramiko
+          from datetime import datetime
+          
+          def upload_sftp(host, username, password, key_data=None, json_file=None, remote_path=None):
+              """
+              Upload JSON data to SFTP server using paramiko
+              """
+              print(f"Tentative de connexion à {host} avec l'utilisateur {username}")
+              
+              try:
+                  # Configurer la connexion SSH
+                  ssh = paramiko.SSHClient()
+                  ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                  
+                  # Tentative de connexion avec clé privée
+                  if key_data:
+                      print("Tentative avec clé privée...")
+                      key_file = "/tmp/temp_key.pem"
+                      
+                      # Écrire la clé dans un fichier temporaire
+                      with open(key_file, 'w') as f:
+                          f.write(key_data)
+                      os.chmod(key_file, 0o600)
+                      
+                      try:
+                          # Essayer avec la clé privée et la passphrase
+                          private_key = paramiko.RSAKey.from_private_key_file(key_file, password=password)
+                          ssh.connect(hostname=host, username=username, pkey=private_key)
+                          print("Connexion établie avec la clé")
+                      except Exception as e:
+                          print(f"Échec avec la clé: {str(e)}")
+                          # Supprimer le fichier clé temporaire en cas d'échec
+                          os.remove(key_file)
+                          
+                          # Réessayer avec mot de passe
+                          print("Tentative avec mot de passe...")
+                          ssh.connect(hostname=host, username=username, password=password)
+                          print("Connexion établie avec mot de passe")
+                  else:
+                      # Connexion directe avec mot de passe
+                      print("Tentative avec mot de passe uniquement...")
+                      ssh.connect(hostname=host, username=username, password=password)
+                      print("Connexion établie avec mot de passe")
+                  
+                  # Ouvrir une session SFTP
+                  sftp = ssh.open_sftp()
+                  
+                  # Vérifier le répertoire courant
+                  print("Répertoire courant:", sftp.getcwd())
+                  
+                  # Essayer de créer le répertoire /json s'il n'existe pas
+                  try:
+                      sftp.mkdir("/json")
+                      print("Répertoire /json créé")
+                  except:
+                      print("Répertoire /json existe déjà ou impossible de le créer")
+                  
+                  # Téléverser le fichier
+                  local_path = json_file
+                  if not remote_path:
+                      remote_path = f"/json/septeo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                  
+                  print(f"Téléversement de {local_path} vers {remote_path}")
+                  sftp.put(local_path, remote_path)
+                  print("Fichier téléversé avec succès")
+                  
+                  # Vérifier que le fichier existe
+                  try:
+                      sftp.stat(remote_path)
+                      print(f"Fichier {remote_path} existe sur le serveur")
+                  except:
+                      print(f"Impossible de vérifier l'existence de {remote_path}")
+                  
+                  # Fermer les connexions
+                  sftp.close()
+                  ssh.close()
+                  
+                  # Supprimer le fichier clé temporaire si existant
+                  if key_data and os.path.exists("/tmp/temp_key.pem"):
+                      os.remove("/tmp/temp_key.pem")
+                      
+                  return True
+              except Exception as e:
+                  print(f"Erreur: {str(e)}")
+                  
+                  # Supprimer le fichier clé temporaire si existant
+                  if key_data and os.path.exists("/tmp/temp_key.pem"):
+                      os.remove("/tmp/temp_key.pem")
+                      
+                  return False
+          
+          if __name__ == "__main__":
+              # Lire les paramètres d'environnement
+              host = os.environ.get('SFTP_HOST')
+              username = os.environ.get('SFTP_USERNAME')
+              password = os.environ.get('SFTP_PASSWORD')
+              key_data = os.environ.get('SFTP_KEY')
+              json_file = os.environ.get('JSON_FILE')
+              remote_path = os.environ.get('REMOTE_PATH')
+              
+              if not all([host, username, json_file]):
+                  print("Erreur: Les paramètres SFTP_HOST, SFTP_USERNAME et JSON_FILE sont requis")
+                  sys.exit(1)
+              
+              if not (password or key_data):
+                  print("Erreur: Au moins l'un des paramètres SFTP_PASSWORD ou SFTP_KEY est requis")
+                  sys.exit(1)
+              
+              success = upload_sftp(host, username, password, key_data, json_file, remote_path)
+              sys.exit(0 if success else 1)
           EOF
           
-          echo "Tentative alternative avec SCP et mot de passe..."
-          # Utiliser scp avec sshpass
-          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -o StrictHostKeyChecking=no septeo.json i00003-septeo@ftp.notaires.fr:/tmp/test.json || echo "SCP a échoué avec code $?"
-          
-      - name: Try curl SFTP upload
+          chmod +x sftp_upload.py
+      
+      - name: Execute Python SFTP script
         run: |
-          echo "Tentative avec curl SFTP..."
-          curl -v --insecure -u i00003-septeo:"${{ secrets.SFTP_PASSPHRASE }}" -T septeo.json sftp://ftp.notaires.fr/json/septeo_curl.json || echo "curl a échoué avec code $?"
+          python sftp_upload.py
+        env:
+          SFTP_HOST: ftp.notaires.fr
+          SFTP_USERNAME: i00003-septeo
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSPHRASE }}
+          SFTP_KEY: ${{ secrets.SFTP_PRIVATE_KEY }}
+          JSON_FILE: septeo.json
+          REMOTE_PATH: /json/septeo.json
+      
+      - name: Alternative SCP upload if Python fails
+        if: ${{ failure() }}
+        run: |
+          echo "La méthode Python a échoué, tentative avec scp..."
           
+          # Installer sshpass
+          sudo apt-get install -y sshpass
+          
+          # Créer un fichier temporaire pour la clé privée
+          echo "${{ secrets.SFTP_PRIVATE_KEY }}" > /tmp/key.pem
+          chmod 600 /tmp/key.pem
+          
+          # Essayer SCP avec différentes options
+          echo "Essai 1: SCP avec clé privée"
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -o StrictHostKeyChecking=no -i /tmp/key.pem septeo.json i00003-septeo@ftp.notaires.fr:/json/septeo_$(date +%s).json || echo "Échec de l'essai 1"
+          
+          echo "Essai 2: SCP avec mot de passe uniquement"
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" scp -o StrictHostKeyChecking=no septeo.json i00003-septeo@ftp.notaires.fr:/json/septeo_$(date +%s).json || echo "Échec de l'essai 2"
+          
+          # Nettoyer
+          rm -f /tmp/key.pem
+      
       - name: Cleanup
         if: always()
         run: |
           rm -f septeo.json
-          rm -f ~/.ssh/id_rsa
+          rm -f /tmp/temp_key.pem
           echo "Nettoyage terminé"
