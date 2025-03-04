@@ -21,23 +21,36 @@ jobs:
           echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
           echo "JSON file created: $(ls -la septeo.json)"
           
-      - name: Setup SFTP Private Key
+      - name: Setup SFTP Private Key & Environment
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SFTP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ftp.notaires.fr >> ~/.ssh/known_hosts
-          echo "SSH directory setup complete"
           
-      - name: Transfer File via SFTP
-        run: |
-          echo "Starting SFTP transfer..."
-          sftp -v -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
+          # Installer sshpass pour gérer la passphrase
+          sudo apt-get update && sudo apt-get install -y sshpass
+          
+          # Créer un script pour automatiser l'envoi SFTP avec passphrase
+          cat > sftp_script.sh << 'EOF'
+          #!/bin/bash
+          sshpass -p "$SFTP_PASSPHRASE" sftp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << 'SFTPCOMMANDS'
           cd /json
           put septeo.json
           ls -la
           bye
+          SFTPCOMMANDS
           EOF
+          
+          chmod +x sftp_script.sh
+          echo "SSH and SFTP environment setup complete"
+          
+      - name: Transfer File via SFTP
+        env:
+          SFTP_PASSPHRASE: ${{ secrets.SFTP_PASSPHRASE }}
+        run: |
+          echo "Starting SFTP transfer..."
+          ./sftp_script.sh
           echo "SFTP transfer completed"
           
       - name: Cleanup
@@ -45,4 +58,5 @@ jobs:
         run: |
           rm -f septeo.json
           rm -f ~/.ssh/id_rsa
+          rm -f sftp_script.sh
           echo "Cleanup completed"
