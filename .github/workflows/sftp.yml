@@ -1,4 +1,4 @@
-name: SFTP Transfer
+name: SFTP Transfer via Gist
 
 on:
   repository_dispatch:
@@ -15,48 +15,65 @@ jobs:
         run: |
           echo "Event received at $(date)"
           echo "Timestamp from request: ${{ github.event.client_payload.timestamp }}"
+          echo "Gist ID: ${{ github.event.client_payload.gist_id }}"
       
-      - name: Create JSON file
+      - name: Fetch JSON data from Gist
+        id: fetch-gist
         run: |
-          echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
-          echo "JSON file created: $(ls -la septeo.json)"
+          # Récupérer le contenu du Gist
+          echo "Téléchargement des données depuis le Gist..."
+          GIST_CONTENT=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "User-Agent: GitHub-Action" \
+            "https://api.github.com/gists/${{ github.event.client_payload.gist_id }}")
           
-      - name: Setup SFTP Private Key & Environment
+          # Extraire l'URL du contenu brut
+          RAW_URL=$(echo "$GIST_CONTENT" | grep -o '"raw_url": "[^"]*"' | grep -o 'https://[^"]*')
+          
+          # Télécharger le contenu JSON brut
+          curl -s "$RAW_URL" > septeo.json
+          
+          # Vérifier que le fichier existe et a un contenu
+          if [ -s septeo.json ]; then
+            echo "JSON récupéré avec succès ($(stat -c%s septeo.json) octets)"
+          else
+            echo "Erreur: Impossible de récupérer le contenu JSON"
+            exit 1
+          fi
+          
+      - name: Setup SFTP Private Key
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SFTP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ftp.notaires.fr >> ~/.ssh/known_hosts
+          echo "SSH directory setup complete"
           
-          # Installer sshpass pour gérer la passphrase
-          sudo apt-get update && sudo apt-get install -y sshpass
-          
-          # Créer un script pour automatiser l'envoi SFTP avec passphrase
-          cat > sftp_script.sh << 'EOF'
-          #!/bin/bash
-          sshpass -p "$SFTP_PASSPHRASE" sftp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << 'SFTPCOMMANDS'
+      - name: Transfer File via SFTP
+        run: |
+          echo "Starting SFTP transfer..."
+          sshpass -p "${{ secrets.SFTP_PASSPHRASE }}" sftp -v -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa i00003-septeo@ftp.notaires.fr << EOF
           cd /json
           put septeo.json
           ls -la
           bye
-          SFTPCOMMANDS
           EOF
-          
-          chmod +x sftp_script.sh
-          echo "SSH and SFTP environment setup complete"
-          
-      - name: Transfer File via SFTP
-        env:
-          SFTP_PASSPHRASE: ${{ secrets.SFTP_PASSPHRASE }}
-        run: |
-          echo "Starting SFTP transfer..."
-          ./sftp_script.sh
           echo "SFTP transfer completed"
+          
+      - name: Delete Gist after successful transfer
+        if: success()
+        run: |
+          echo "Suppression du Gist temporaire..."
+          curl -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "User-Agent: GitHub-Action" \
+            "https://api.github.com/gists/${{ github.event.client_payload.gist_id }}"
+          echo "Gist supprimé"
           
       - name: Cleanup
         if: always()
         run: |
           rm -f septeo.json
           rm -f ~/.ssh/id_rsa
-          rm -f sftp_script.sh
           echo "Cleanup completed"
