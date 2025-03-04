@@ -14,24 +14,36 @@ jobs:
       - name: Log event details
         run: |
           echo "Event received at $(date)"
-          echo "Timestamp from request: ${{ github.event.client_payload.timestamp }}"
+          echo "Timestamp from request: ${{ github.event.client_payload.timestamp || 'Not provided' }}"
+          echo "Debug payload data:"
+          echo '${{ toJson(github.event.client_payload) }}'
       
-      - name: Create JSON file from payload
+      - name: Create JSON file from payload or create test file
         run: |
-          # Créer JSON directement à partir du payload
-          echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
+          # Vérifier si le payload contient des données json_data
+          if [ -n "${{ github.event.client_payload.json_data }}" ]; then
+            echo "Création du fichier JSON depuis le payload..."
+            echo '${{ toJson(github.event.client_payload.json_data) }}' > septeo.json
+          else
+            echo "Payload vide ou invalide, création d'un fichier JSON de test..."
+            # Créer un JSON de test
+            echo '{"test":"Données de test", "date":"'"$(date)"'", "source":"GitHub Actions"}' > septeo.json
+          fi
           
-          # Vérifier que le fichier existe
+          # Vérifier que le fichier a été créé
           if [ -s septeo.json ]; then
             echo "JSON créé avec succès ($(stat -c%s septeo.json) octets)"
             echo "Aperçu du contenu:"
             head -n 5 septeo.json
           else
-            echo "ERREUR: Création du fichier JSON échouée"
-            # Créer un fichier de test minimal si le vrai fichier n'existe pas
-            echo '{"test":"données test"}' > septeo.json
-            echo "Fichier test créé à la place"
+            echo "ATTENTION: Fichier vide, création d'un nouveau fichier de secours"
+            echo '{"backup":"Fichier de secours créé le '"$(date)"'"}' > septeo.json
+            echo "Fichier de secours créé"
           fi
+          
+          # Afficher le contenu du fichier pour déboguer
+          echo "Contenu complet du fichier JSON:"
+          cat septeo.json
           
       - name: Install required packages
         run: |
@@ -55,8 +67,6 @@ jobs:
       - name: Transfer File via SFTP
         run: |
           echo "Début du transfert SFTP..."
-          echo "Contenu du fichier local:"
-          cat septeo.json
           
           # Premier essai avec sftp
           echo "Tentative SFTP avec chemin absolu..."
@@ -99,7 +109,7 @@ jobs:
           echo "Contenu du répertoire racine:"
           ls -la
           echo "Contenu du répertoire json (relatif):"
-          ls -la json/
+          ls -la json/ 2>/dev/null || echo "Répertoire json/ n'existe pas"
           EOF
           
       - name: Cleanup
